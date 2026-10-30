@@ -1,0 +1,46 @@
+{
+  "FixedFileInfo": {
+    "FileVersion": {
+      "Major": 1,
+      "Minor": 0,
+      "Patch": 0,
+      "Build": 0
+    },
+    "ProductVersion": {
+      "Major": 1,
+      "Minor": 0,
+      "Patch": 0,
+      "Build": 0
+    },
+    "FileFlagsMask": "3f",
+    "FileFlags": "00",
+    "FileOS": "040004",
+    "FileType": "01",
+    "FileSubType": "00"
+  },
+  "StringFileInfo": {
+    "Comments": "Zapret DPI Controller",
+    "CompanyName": "Flowseal / VetalNorth",
+    "FileDescription": "Zapret DPI Bypass Suite",
+    "FileVersion": "1.0.0.0",
+    "InternalName": "zapret-launcher",
+    "LegalCopyright": "Copyright 2026",
+    "OriginalFilename": "zapret-launcher.exe",
+    "ProductName": "Zapret Ultimate",
+    "ProductVersion": "1.0.0.0"
+  },
+  "VarFileInfo": {
+    "Translation": {
+      "LangID": "0419",
+      "CharsetID": "04B0"
+    }
+  },
+  "Manifest": {
+    "Identity": {
+      "Name": "Zapret.Launcher.App",
+      "Version": "1.0.0.0"
+    },
+    "ExecutionLevel": "requireAdministrator",
+    "DpiAwareness": "PerMonitorV2"
+  }
+}
