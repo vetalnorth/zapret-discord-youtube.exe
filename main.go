@@ -38,15 +38,8 @@ func initConsole() {
 	if err := windows.GetConsoleMode(handle, &mode); err == nil {
 		_ = windows.SetConsoleMode(handle, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
 	}
-	// Устанавливаем заголовок окна консоли
-	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
-	setConsoleTitle := kernel32.NewProc("SetConsoleTitleW")
-	titlePtr, _ := windows.UTF16PtrFromString("Zapret DPI Manager")
-	_, _, _ = setConsoleTitle.Call(uintptr(unsafePointer(titlePtr)))
-}
-
-func unsafePointer(p *uint16) *uint16 {
-	return p
+	// Заголовок окна терминала через ANSI-код
+	fmt.Print("\033]0;Zapret DPI Controller\007")
 }
 
 func main() {
@@ -76,7 +69,7 @@ func main() {
 
 	checkAutoRun()
 
-	// 1. Ищем батники сначала в скрытой папке presets, затем в корне
+	// Ищем батники в папке presets или рядом в корне
 	presetDir := filepath.Join(baseDir, "presets")
 	if _, err := os.Stat(presetDir); os.IsNotExist(err) {
 		presetDir = baseDir
@@ -154,7 +147,6 @@ func scanBatFiles(baseDir, searchDir string) []Strategy {
 			matches := argRegex.FindStringSubmatch(string(content))
 			if len(matches) > 1 {
 				rawArgs := matches[1]
-				// Корректируем пути под структуру с подпапкой presets
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0bin\\", filepath.Join(baseDir, "bin")+"\\")
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0lists\\", filepath.Join(baseDir, "lists")+"\\")
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\bin\\", filepath.Join(baseDir, "bin")+"\\")
