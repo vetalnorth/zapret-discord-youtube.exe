@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,146 +13,148 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
-type GitHubContent struct {
-	Name        string `json:"name"`
-	DownloadURL string `json:"download_url"`
-	Type        string `json:"type"`
-}
+// ANSI Цвета
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorBold   = "\033[1m"
+)
 
 type Strategy struct {
 	Name string
 	Args []string
 }
 
+func enableANSI() {
+	var mode uint32
+	handle := windows.Handle(os.Stdout.Fd())
+	if err := windows.GetConsoleMode(handle, &mode); err == nil {
+		_ = windows.SetConsoleMode(handle, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+	}
+}
+
 func main() {
-	fmt.Println("==================================================")
-	fmt.Println("       Zapret Dynamic Launcher (Windows)          ")
-	fmt.Println("  Auto-Sync from Flowseal, Benchmark & Auto-Run   ")
-	fmt.Println("==================================================")
+	enableANSI()
+
+	fmt.Print("\033[H\033[2J") // Очистка экрана
+	fmt.Println(colorCyan + colorBold + `
+  ███████╗ █████╗ ██████╗ ██████╗ ███████╗████████╗
+  ╚══███╔╝██╔══██╗██╔══██╗██╔══██╗██╔════╝╚══██╔══╝
+    ███╔╝ ███████║██████╔╝██████╔╝█████╗     ██║   
+   ███╔╝  ██╔══██║██╔═══╝ ██╔══██╗██╔══╝     ██║   
+  ███████╗██║  ██║██║     ██║  ██║███████╗   ██║   
+  ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝   ` + colorReset)
+	fmt.Println(colorYellow + "   >>> Flowseal Edition • Auto-Benchmark Engine <<<   " + colorReset)
+	fmt.Println("---------------------------------------------------------")
 
 	exePath, err := os.Executable()
 	if err != nil {
-		fmt.Printf("[-] Ошибка путей: %v\n", err)
+		fmt.Printf(colorRed+"[-] Критическая ошибка путей: %v\n"+colorReset, err)
 		return
 	}
 	baseDir := filepath.Dir(exePath)
 	winwsPath := filepath.Join(baseDir, "bin", "winws.exe")
 
 	if _, err := os.Stat(winwsPath); os.IsNotExist(err) {
-		fmt.Println("[-] Ошибка: папка bin или файл winws.exe не найдены рядом с лаунчером!")
+		fmt.Println(colorRed + "[-] winws.exe не обнаружен в папке bin/!" + colorReset)
+		fmt.Println("    Убедитесь, что архив распакован полностью.")
 		waitExit()
 		return
 	}
 
-	// 1. Проверяем автозапуск в реестре
 	checkAutoRun()
 
-	// 2. Синхронизируем стратегии напрямую из репозитория Flowseal
-	strategies := fetchUpstreamStrategies(baseDir)
+	strategies := scanLocalBatFiles(baseDir)
 	if len(strategies) == 0 {
-		fmt.Println("[!] Не удалось загрузить батники с GitHub, используем резервные стратегии...")
-		strategies = getFallbackStrategies(baseDir)
+		fmt.Println(colorRed + "[-] В папке не найдено ни одного батника обхода (general*.bat)!" + colorReset)
+		waitExit()
+		return
 	}
 
-	// 3. Автоподбор рабочей стратегии
-	fmt.Println("\n[*] Начинаем автоподбор рабочей конфигурации...")
+	fmt.Printf("\n[i] Обнаружено готовых стратегий обхода: %s%d%s\n", colorBold, len(strategies), colorReset)
+	fmt.Println("[*] Запуск автоматического тестирования под вашего провайдера...\n")
+
 	var workingStrat *Strategy
 
 	for i, strat := range strategies {
-		fmt.Printf("[%d/%d] Проверяем: %s... ", i+1, len(strategies), strat.Name)
+		displayName := strings.TrimSuffix(strat.Name, ".bat")
+		fmt.Printf(" [%s%d/%d%s] %-30s ", colorCyan, i+1, len(strategies), colorReset, displayName)
+
 		stopWinWS()
 
 		cmd := exec.Command(winwsPath, strat.Args...)
 		if err := cmd.Start(); err != nil {
-			fmt.Println("ошибка старта")
+			fmt.Println(colorRed + "[ОШИБКА ЗАПУСКА]" + colorReset)
 			continue
 		}
 
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(1400 * time.Millisecond)
 
 		if testConnection() {
-			fmt.Println("РАБОТАЕТ!")
+			fmt.Println(colorGreen + colorBold + "[РАБОТАЕТ]" + colorReset)
 			workingStrat = &strat
 			break
 		} else {
-			fmt.Println("блокируется")
+			fmt.Println(colorRed + "[БЛОКИРУЕТСЯ]" + colorReset)
 		}
 	}
 
 	if workingStrat == nil {
-		fmt.Println("\n[-] Ни один вариант не дал стабильного подключения.")
+		fmt.Println(colorRed + "\n[-] Ни одна из доступных стратегий не пробила фильтрацию." + colorReset)
 		stopWinWS()
 		waitExit()
 		return
 	}
 
-	fmt.Printf("\n[+] Оптимальная конфигурация найдена и активна: %s\n", workingStrat.Name)
+	fmt.Println("\n---------------------------------------------------------")
+	fmt.Printf(colorGreen+colorBold+"[+] УСПЕШНО: активирована стратегия %s\n"+colorReset, workingStrat.Name)
+	fmt.Println("---------------------------------------------------------")
 
-	// 4. Предложение автозапуска
 	suggestAutoRun(exePath)
 
-	fmt.Println("\n[i] Лаунчер работает в фоне. Для остановки закройте это окно.")
+	fmt.Println(colorCyan + "\n[•] Служба работает в фоне. Закройте окно для отключения." + colorReset)
 	waitExit()
 }
 
-func fetchUpstreamStrategies(baseDir string) []Strategy {
-	fmt.Println("[*] Проверка обновлений и батников в репозитории Flowseal...")
-
-	client := http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequest("GET", "https://api.github.com/repos/Flowseal/zapret-discord-youtube/contents", nil)
-	req.Header.Set("User-Agent", "Zapret-Auto-Launcher")
-
-	resp, err := client.Do(req)
+func scanLocalBatFiles(baseDir string) []Strategy {
+	files, err := os.ReadDir(baseDir)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
+	var strats []Strategy
+	argRegex := regexp.MustCompile(`(?i)winws\.exe\s+([^\r\n]+)`)
 
-	var contents []GitHubContent
-	if err := json.NewDecoder(resp.Body).Decode(&contents); err != nil {
-		return nil
-	}
-
-	var list []Strategy
-	argRegex := regexp.MustCompile(`winws\.exe\s+([^\r\n]+)`)
-
-	for _, item := range contents {
-		if item.Type == "file" && strings.HasPrefix(item.Name, "general") && strings.HasSuffix(item.Name, ".bat") {
-			rawResp, err := client.Get(item.DownloadURL)
+	for _, f := range files {
+		if !f.IsDir() && strings.HasPrefix(strings.ToLower(f.Name()), "general") && strings.HasSuffix(strings.ToLower(f.Name()), ".bat") {
+			content, err := os.ReadFile(filepath.Join(baseDir, f.Name()))
 			if err != nil {
 				continue
 			}
-			bodyBytes, _ := io.ReadAll(rawResp.Body)
-			rawResp.Body.Close()
 
-			matches := argRegex.FindStringSubmatch(string(bodyBytes))
+			matches := argRegex.FindStringSubmatch(string(content))
 			if len(matches) > 1 {
 				rawArgs := matches[1]
-				// Подставляем локальные пути вместо относительных путей автора
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0bin\\", filepath.Join(baseDir, "bin")+"\\")
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0lists\\", filepath.Join(baseDir, "lists")+"\\")
-				rawArgs = strings.ReplaceAll(rawArgs, "\"%~dp0", "\""+baseDir+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0", baseDir+"\\")
 
 				args := parseArgs(rawArgs)
-				list = append(list, Strategy{
-					Name: item.Name,
+				strats = append(strats, Strategy{
+					Name: f.Name(),
 					Args: args,
 				})
 			}
 		}
 	}
-
-	if len(list) > 0 {
-		fmt.Printf("[+] Успешно получено батников от автора: %d шт.\n", len(list))
-	}
-	return list
+	return strats
 }
 
 func parseArgs(raw string) []string {
@@ -181,29 +181,13 @@ func parseArgs(raw string) []string {
 	return args
 }
 
-func getFallbackStrategies(baseDir string) []Strategy {
-	return []Strategy{
-		{
-			Name: "Default Fallback General",
-			Args: []string{
-				"--wf-raw=@" + filepath.Join(baseDir, "bin", "windivert.filter"),
-				"--wf-tcp=80,443", "--wf-udp=443,50000-65535",
-				"--filter-udp=443", "--hostlist=" + filepath.Join(baseDir, "lists", "list-general.txt"),
-				"--dpi-desync=fake", "--dpi-desync-repeats=6",
-				"--new", "--filter-tcp=443", "--hostlist=" + filepath.Join(baseDir, "lists", "list-general.txt"),
-				"--dpi-desync=fake,split2", "--dpi-desync-autottl=2",
-			},
-		},
-	}
-}
-
 func testConnection() bool {
 	client := http.Client{
-		Timeout: 2000 * time.Millisecond,
+		Timeout: 2200 * time.Millisecond,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			DialContext: (&net.Dialer{
-				Timeout: 1500 * time.Millisecond,
+				Timeout: 1800 * time.Millisecond,
 			}).DialContext,
 		},
 	}
@@ -230,7 +214,7 @@ func checkAutoRun() {
 
 	val, _, err := k.GetStringValue("ZapretLauncher")
 	if err == nil && val != "" {
-		fmt.Println("[+] Статус автозагрузки Windows: ВКЛЮЧЕН")
+		fmt.Println(colorGreen + "[v] Автозагрузка Windows: включена" + colorReset)
 	}
 }
 
@@ -244,7 +228,7 @@ func suggestAutoRun(appPath string) {
 		}
 	}
 
-	fmt.Print("\n[?] Запускать этот обход автоматически при старте Windows? (y/n): ")
+	fmt.Print("\n[?] Запускать выбранную конфигурацию при включении ПК? (y/n): ")
 	reader := bufio.NewReader(os.Stdin)
 	ans, _ := reader.ReadString('\n')
 	ans = strings.ToLower(strings.TrimSpace(ans))
@@ -254,7 +238,7 @@ func suggestAutoRun(appPath string) {
 		if err == nil {
 			defer kWrite.Close()
 			_ = kWrite.SetStringValue("ZapretLauncher", fmt.Sprintf("\"%s\"", appPath))
-			fmt.Println("[+] Добавлено в автозапуск Windows.")
+			fmt.Println(colorGreen + "[+] Запуск добавлен в автозагрузку системы." + colorReset)
 		}
 	}
 }
