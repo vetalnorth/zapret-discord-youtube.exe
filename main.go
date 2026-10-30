@@ -51,8 +51,8 @@ func main() {
    ███╔╝  ██╔══██║██╔═══╝ ██╔══██╗██╔══╝     ██║   
   ███████╗██║  ██║██║     ██║  ██║███████╗   ██║   
   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝   ` + colorReset)
-	fmt.Println(colorYellow + "   >>> Flowseal Edition • Auto-Benchmark Engine <<<   " + colorReset)
-	fmt.Println("---------------------------------------------------------")
+	fmt.Println(colorYellow + "   >>> Launcher by vetalnorth | Core & Presets by Flowseal <<<   " + colorReset)
+	fmt.Println("------------------------------------------------------------------")
 
 	exePath, err := os.Executable()
 	if err != nil {
