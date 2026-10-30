@@ -20,19 +20,20 @@ jobs:
 
     - name: Build Launcher
       run: |
+        go mod init zapret-launcher
+        go get golang.org/x/sys/windows/registry
         go build -ldflags="-s -w" -o zapret-launcher.exe main.go
 
-    - name: Pack Full Distribution
+    - name: Prepare Distribution Folder
       run: |
         mkdir dist
         copy zapret-launcher.exe dist\
         xcopy bin dist\bin\ /E /I /Y
         xcopy lists dist\lists\ /E /I /Y
         copy README.md dist\
-        compress-archive -Path dist\* -DestinationPath zapret-launcher-windows.zip
 
-    - name: Upload Artifact
+    - name: Upload Single Clean Archive
       uses: actions/upload-artifact@v4
       with:
         name: zapret-launcher-windows
-        path: zapret-launcher-windows.zip
+        path: dist/
