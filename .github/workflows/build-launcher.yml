@@ -18,12 +18,11 @@ jobs:
       with:
         go-version: '1.22'
 
-    - name: Build Launcher
+    - name: Build Graphical Launcher
       run: |
         go mod init zapret-launcher
-        go get golang.org/x/sys/windows
         go get golang.org/x/sys/windows/registry
-        go build -ldflags="-s -w" -o zapret-launcher.exe main.go
+        go build -ldflags="-H=windowsgui -s -w" -o zapret-launcher.exe main.go
 
     - name: Prepare Clean Distribution
       run: |
