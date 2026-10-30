@@ -33,12 +33,12 @@ jobs:
     - name: Prepare Clean Distribution
       run: |
         mkdir dist
-        mkdir dist\presets
         copy zapret-launcher.exe dist\
-        copy "general*.bat" dist\presets\
+        copy "general*.bat" dist\
         xcopy bin dist\bin\ /E /I /Y
         xcopy lists dist\lists\ /E /I /Y
         copy README.md dist\
+        attrib +h dist\general*.bat
 
     - name: Upload Single Clean Archive
       uses: actions/upload-artifact@v4
