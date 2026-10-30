@@ -28,8 +28,9 @@ jobs:
     - name: Prepare Clean Distribution
       run: |
         mkdir dist
+        mkdir dist\presets
         copy zapret-launcher.exe dist\
-        copy "general*.bat" dist\
+        copy "general*.bat" dist\presets\
         xcopy bin dist\bin\ /E /I /Y
         xcopy lists dist\lists\ /E /I /Y
         copy README.md dist\
