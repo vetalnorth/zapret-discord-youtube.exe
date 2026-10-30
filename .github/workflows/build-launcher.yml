@@ -21,7 +21,7 @@ jobs:
     - name: Generate Windows Resources & Manifest
       run: |
         go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
-        goversioninfo -manifest=true versioninfo.json
+        goversioninfo versioninfo.json
 
     - name: Build Graphical Launcher
       run: |
