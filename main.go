@@ -12,32 +12,38 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
 
 type Strategy struct {
-	Name string
-	Args []string
+	Name string   `json:"name"`
+	Args []string `json:"args"`
 }
 
 var (
 	baseDir      string
 	winwsPath    string
 	workingStrat *Strategy
+	allStrats    []Strategy
 	mu           sync.Mutex
 	srv          *http.Server
+	currentCmd   *exec.Cmd
 )
 
-var currentProgress = struct {
-	Total      int    `json:"total"`
-	CurrentIdx int    `json:"current_idx"`
-	CheckName  string `json:"check_name"`
-	ActiveName string `json:"active_name"`
-	IsRunning  bool   `json:"is_running"`
-	IsDone     bool   `json:"is_done"`
-	AutoRun    bool   `json:"autorun"`
+var appState = struct {
+	Total       int        `json:"total"`
+	CurrentIdx  int        `json:"current_idx"`
+	CheckName   string     `json:"check_name"`
+	ActiveName  string     `json:"active_name"`
+	IsRunning   bool       `json:"is_running"`
+	IsDone      bool       `json:"is_done"`
+	AutoRun     bool       `json:"autorun"`
+	GameMode    bool       `json:"gamemode"`
+	PingMs      int        `json:"ping_ms"`
+	PresetsList []string   `json:"presets_list"`
 }{}
 
 func main() {
@@ -52,6 +58,9 @@ func main() {
 	http.HandleFunc("/", serveUI)
 	http.HandleFunc("/api/status", handleStatus)
 	http.HandleFunc("/api/toggle-autorun", handleToggleAutorun)
+	http.HandleFunc("/api/toggle-gamemode", handleToggleGameMode)
+	http.HandleFunc("/api/select-preset", handleSelectPreset)
+	http.HandleFunc("/api/rescan", handleRescan)
 	http.HandleFunc("/api/stop", handleStop)
 
 	go func() {
@@ -59,73 +68,109 @@ func main() {
 		_ = srv.ListenAndServe()
 	}()
 
-	// Запуск движка поиска и перебора стратегий в отдельном потоке
-	go runBenchmarkEngine()
+	go initEngine()
 
-	// Запуск бесшовного приложения без рамки браузера
 	time.Sleep(350 * time.Millisecond)
 	url := fmt.Sprintf("http://127.0.0.1:%s", port)
-	cmd := exec.Command("cmd", "/c", "start", "msedge", "--app="+url, "--window-size=620,530")
+	cmd := exec.Command("cmd", "/c", "start", "msedge", "--app="+url, "--window-size=680,680")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = cmd.Run()
 
 	select {}
 }
 
-func runBenchmarkEngine() {
+func initEngine() {
 	mu.Lock()
-	currentProgress.AutoRun = checkAutoRun()
+	appState.AutoRun = checkAutoRun()
 	mu.Unlock()
 
-	// Приоритетно сканируем подпапку presets, если нет — корень
 	presetDir := filepath.Join(baseDir, "presets")
 	if _, err := os.Stat(presetDir); os.IsNotExist(err) {
 		presetDir = baseDir
 	}
 
-	strategies := scanBatFiles(baseDir, presetDir)
+	allStrats = scanBatFiles(baseDir, presetDir)
+	
+	var names []string
+	for _, s := range allStrats {
+		names = append(names, strings.TrimSuffix(s.Name, ".bat"))
+	}
+
 	mu.Lock()
-	currentProgress.Total = len(strategies)
-	currentProgress.IsRunning = true
+	appState.PresetsList = names
+	appState.Total = len(allStrats)
 	mu.Unlock()
 
-	if len(strategies) == 0 {
+	runBenchmarkEngine()
+}
+
+func runBenchmarkEngine() {
+	mu.Lock()
+	appState.IsRunning = true
+	appState.IsDone = false
+	appState.ActiveName = ""
+	mu.Unlock()
+
+	if len(allStrats) == 0 {
 		mu.Lock()
-		currentProgress.IsDone = true
-		currentProgress.IsRunning = false
+		appState.IsDone = true
+		appState.IsRunning = false
 		mu.Unlock()
 		return
 	}
 
-	for i, strat := range strategies {
+	for i, strat := range allStrats {
 		mu.Lock()
-		currentProgress.CurrentIdx = i + 1
-		currentProgress.CheckName = strings.TrimSuffix(strat.Name, ".bat")
+		if !appState.IsRunning {
+			mu.Unlock()
+			return
+		}
+		appState.CurrentIdx = i + 1
+		appState.CheckName = strings.TrimSuffix(strat.Name, ".bat")
 		mu.Unlock()
 
-		stopWinWS()
+		startStrategy(&strat)
+		time.Sleep(2000 * time.Millisecond)
 
-		cmd := exec.Command(winwsPath, strat.Args...)
-		if err := cmd.Start(); err != nil {
-			continue
-		}
-
-		time.Sleep(1400 * time.Millisecond)
-
-		if testConnection() {
+		ok, ping := testConnectionDetailed()
+		if ok {
 			mu.Lock()
 			workingStrat = &strat
-			currentProgress.ActiveName = strings.TrimSuffix(strat.Name, ".bat")
-			currentProgress.IsDone = true
-			currentProgress.IsRunning = false
+			appState.ActiveName = strings.TrimSuffix(strat.Name, ".bat")
+			appState.PingMs = ping
+			appState.IsDone = true
+			appState.IsRunning = false
 			mu.Unlock()
 			return
 		}
 	}
 
 	mu.Lock()
-	currentProgress.IsDone = true
-	currentProgress.IsRunning = false
+	appState.IsDone = true
+	appState.IsRunning = false
 	mu.Unlock()
+}
+
+func startStrategy(strat *Strategy) {
+	stopWinWS()
+
+	args := make([]string, len(strat.Args))
+	copy(args, strat.Args)
+
+	// Если включен игровой режим — добавляем параметры для Discord Voice/UDP
+	mu.Lock()
+	if appState.GameMode {
+		args = append(args, "--filter-udp=50000-65535", "--dpi-desync=fake", "--dpi-desync-any-protocol")
+	}
+	mu.Unlock()
+
+	currentCmd = exec.Command(winwsPath, args...)
+	currentCmd.Dir = filepath.Join(baseDir, "bin")
+	currentCmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+	_ = currentCmd.Start()
 }
 
 func scanBatFiles(baseDir, searchDir string) []Strategy {
@@ -135,7 +180,6 @@ func scanBatFiles(baseDir, searchDir string) []Strategy {
 	}
 
 	var strats []Strategy
-	// Ловит вызовы winws с любыми кавычками, пробелами и путями
 	argRegex := regexp.MustCompile(`(?i)winws(?:\.exe)?"?\s+([^\r\n]+)`)
 
 	for _, f := range files {
@@ -149,13 +193,15 @@ func scanBatFiles(baseDir, searchDir string) []Strategy {
 			matches := argRegex.FindStringSubmatch(string(content))
 			if len(matches) > 1 {
 				rawArgs := matches[1]
-				// Заменяем шаблоны путей на абсолютные пути к bin и lists
-				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0bin\\", filepath.Join(baseDir, "bin")+"\\")
-				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0lists\\", filepath.Join(baseDir, "lists")+"\\")
-				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\bin\\", filepath.Join(baseDir, "bin")+"\\")
-				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\lists\\", filepath.Join(baseDir, "lists")+"\\")
-				rawArgs = strings.ReplaceAll(rawArgs, "%BIN%", filepath.Join(baseDir, "bin")+"\\")
-				rawArgs = strings.ReplaceAll(rawArgs, "%LISTS%", filepath.Join(baseDir, "lists")+"\\")
+				binDir := filepath.Join(baseDir, "bin")
+				listsDir := filepath.Join(baseDir, "lists")
+
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0bin\\", binDir+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0lists\\", listsDir+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\bin\\", binDir+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\lists\\", listsDir+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%BIN%", binDir+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%LISTS%", listsDir+"\\")
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0", baseDir+"\\")
 
 				args := parseArgs(rawArgs)
@@ -195,27 +241,43 @@ func parseArgs(raw string) []string {
 	return args
 }
 
-func testConnection() bool {
+func testConnectionDetailed() (bool, int) {
+	targets := []string{
+		"https://www.youtube.com",
+		"https://rr1---sn-axq7sn76.googlevideo.com",
+		"https://discord.com",
+	}
+
 	client := http.Client{
-		Timeout: 2000 * time.Millisecond,
+		Timeout: 2500 * time.Millisecond,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			DialContext: (&net.Dialer{
-				Timeout: 1500 * time.Millisecond,
+				Timeout: 1800 * time.Millisecond,
 			}).DialContext,
 		},
 	}
 
-	resp, err := client.Get("https://www.youtube.com")
-	if err != nil {
-		return false
+	for _, url := range targets {
+		start := time.Now()
+		resp, err := client.Get(url)
+		if err == nil {
+			elapsed := int(time.Since(start).Milliseconds())
+			_ = resp.Body.Close()
+			if resp.StatusCode > 0 && resp.StatusCode < 500 {
+				return true, elapsed
+			}
+		}
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
+	return false, 0
 }
 
 func stopWinWS() {
 	cmd := exec.Command("taskkill", "/F", "/IM", "winws.exe", "/T")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
 	_ = cmd.Run()
 }
 
@@ -233,7 +295,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(currentProgress)
+	_ = json.NewEncoder(w).Encode(appState)
 }
 
 func handleToggleAutorun(w http.ResponseWriter, r *http.Request) {
@@ -248,12 +310,59 @@ func handleToggleAutorun(w http.ResponseWriter, r *http.Request) {
 		defer k.Close()
 		if isCurrent {
 			_ = k.DeleteValue("ZapretLauncher")
-			currentProgress.AutoRun = false
+			appState.AutoRun = false
 		} else {
 			_ = k.SetStringValue("ZapretLauncher", fmt.Sprintf("\"%s\"", exePath))
-			currentProgress.AutoRun = true
+			appState.AutoRun = true
 		}
 	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleToggleGameMode(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	appState.GameMode = !appState.GameMode
+	isGame := appState.GameMode
+	strat := workingStrat
+	mu.Unlock()
+
+	if strat != nil {
+		startStrategy(strat)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"gamemode": isGame})
+}
+
+func handleSelectPreset(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		return
+	}
+
+	mu.Lock()
+	appState.IsRunning = false
+	var chosen *Strategy
+	for _, s := range allStrats {
+		if strings.TrimSuffix(s.Name, ".bat") == name {
+			chosen = &s
+			break
+		}
+	}
+	mu.Unlock()
+
+	if chosen != nil {
+		startStrategy(chosen)
+		mu.Lock()
+		workingStrat = chosen
+		appState.ActiveName = name
+		appState.IsDone = true
+		mu.Unlock()
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func handleRescan(w http.ResponseWriter, r *http.Request) {
+	go runBenchmarkEngine()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -271,7 +380,7 @@ const htmlUI = `<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Zapret DPI Controller</title>
+  <title>Zapret Ultimate Controller</title>
   <style>
     * {
       box-sizing: border-box;
@@ -283,81 +392,82 @@ const htmlUI = `<!DOCTYPE html>
 
     body {
       height: 100vh;
-      background: #090b10;
+      background: #090b11;
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
       color: #f8fafc;
       overflow: hidden;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      padding: 24px;
+      padding: 22px;
       position: relative;
     }
 
-    /* Фоновые жидкие световые сферы */
+    /* Жидкие цветные сферы */
     .blob {
       position: absolute;
       border-radius: 50%;
-      filter: blur(80px);
+      filter: blur(85px);
       z-index: 0;
       opacity: 0.55;
       pointer-events: none;
-      animation: float 8s ease-in-out infinite alternate;
+      animation: float 9s ease-in-out infinite alternate;
     }
     .blob-1 {
-      width: 260px;
-      height: 260px;
-      background: radial-gradient(circle, #38bdf8, #6366f1);
-      top: -40px;
-      left: -40px;
-    }
-    .blob-2 {
       width: 280px;
       height: 280px;
-      background: radial-gradient(circle, #a855f7, #ec4899);
+      background: radial-gradient(circle, #0284c7, #6366f1);
+      top: -50px;
+      left: -50px;
+    }
+    .blob-2 {
+      width: 300px;
+      height: 300px;
+      background: radial-gradient(circle, #9333ea, #f43f5e);
       bottom: -60px;
-      right: -40px;
-      animation-delay: -3s;
+      right: -50px;
+      animation-delay: -3.5s;
     }
     .blob-3 {
-      width: 180px;
-      height: 180px;
+      width: 200px;
+      height: 200px;
       background: radial-gradient(circle, #10b981, #06b6d4);
-      top: 40%;
-      left: 60%;
-      opacity: 0.3;
-      animation-delay: -5s;
+      top: 45%;
+      left: 55%;
+      opacity: 0.25;
+      animation-delay: -6s;
     }
     @keyframes float {
       0% { transform: translate(0, 0) scale(1); }
-      100% { transform: translate(30px, 20px) scale(1.1); }
+      100% { transform: translate(35px, 25px) scale(1.12); }
     }
 
-    /* Стеклянные панели Liquid Glass */
-    .glass-panel {
+    /* Стеклянный контейнер с неоновым свечением */
+    .glass {
       position: relative;
       z-index: 1;
-      background: rgba(255, 255, 255, 0.06);
-      backdrop-filter: blur(28px) saturate(190%);
-      -webkit-backdrop-filter: blur(28px) saturate(190%);
-      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(32px) saturate(200%);
+      -webkit-backdrop-filter: blur(32px) saturate(200%);
+      border: 1px solid rgba(255, 255, 255, 0.15);
       box-shadow: 
-        0 20px 40px rgba(0, 0, 0, 0.4),
-        inset 0 1px 1px rgba(255, 255, 255, 0.25);
+        0 24px 48px rgba(0, 0, 0, 0.45),
+        inset 0 1px 1px rgba(255, 255, 255, 0.3);
     }
 
+    /* Шапка */
     .header {
-      padding: 14px 18px;
-      border-radius: 18px;
+      padding: 14px 20px;
+      border-radius: 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
     .title-group h1 {
-      font-size: 16px;
+      font-size: 17px;
       font-weight: 700;
-      letter-spacing: 0.3px;
-      background: linear-gradient(135deg, #ffffff 40%, rgba(255,255,255,0.6));
+      letter-spacing: 0.4px;
+      background: linear-gradient(135deg, #ffffff 40%, rgba(255,255,255,0.65));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -366,54 +476,63 @@ const htmlUI = `<!DOCTYPE html>
       color: rgba(255, 255, 255, 0.55);
       margin-top: 1px;
     }
-    .badge {
+    .ping-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.18);
-      padding: 5px 12px;
+      padding: 6px 12px;
       border-radius: 30px;
       font-size: 11px;
       font-weight: 600;
-      letter-spacing: 0.2px;
-      color: #e0f2fe;
-      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2);
+      color: #38bdf8;
+    }
+    .ping-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #38bdf8;
+    }
+    .ping-dot.online {
+      background: #10b981;
+      box-shadow: 0 0 8px #10b981;
     }
 
+    /* Главная карточка */
     .main-card {
-      padding: 34px 24px;
-      border-radius: 26px;
+      padding: 26px 22px;
+      border-radius: 24px;
       display: flex;
       flex-direction: column;
       align-items: center;
       text-align: center;
-      margin: auto 0;
+      margin: 12px 0;
     }
 
     .radar-wrapper {
       position: relative;
-      width: 90px;
-      height: 90px;
+      width: 86px;
+      height: 86px;
       display: flex;
       align-items: center;
       justify-content: center;
-      margin-bottom: 22px;
+      margin-bottom: 16px;
     }
     .radar-core {
-      width: 72px;
-      height: 72px;
+      width: 68px;
+      height: 68px;
       border-radius: 50%;
       background: linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.02));
       border: 1.5px solid rgba(255, 255, 255, 0.3);
-      box-shadow: 
-        0 10px 25px rgba(0, 0, 0, 0.3),
-        inset 0 1px 2px rgba(255, 255, 255, 0.5);
-      position: relative;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35), inset 0 1px 2px rgba(255, 255, 255, 0.5);
       display: flex;
       align-items: center;
       justify-content: center;
     }
     .radar-ring {
       position: absolute;
-      inset: -6px;
+      inset: -5px;
       border-radius: 50%;
       border: 2px solid transparent;
       border-top-color: #38bdf8;
@@ -428,30 +547,127 @@ const htmlUI = `<!DOCTYPE html>
     @keyframes spin { 100% { transform: rotate(360deg); } }
     @keyframes pulse-ring {
       0%, 100% { transform: scale(1); opacity: 0.8; }
-      50% { transform: scale(1.1); opacity: 1; }
+      50% { transform: scale(1.08); opacity: 1; }
     }
 
     .status-caption {
       font-size: 13px;
-      font-weight: 500;
       color: rgba(255, 255, 255, 0.6);
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
     .current-strat {
-      font-size: 21px;
+      font-size: 19px;
       font-weight: 700;
       color: #ffffff;
-      min-height: 28px;
-      letter-spacing: -0.2px;
-      text-shadow: 0 2px 10px rgba(0,0,0,0.4);
+      min-height: 26px;
     }
     .current-strat.active-success {
       background: linear-gradient(135deg, #4ade80, #22d3ee);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
-      text-shadow: none;
     }
 
+    /* Стеклянный блок настроек */
+    .controls-grid {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .control-item {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
+    .control-item:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .control-item span {
+      font-size: 12px;
+      font-weight: 500;
+      color: rgba(255, 255, 255, 0.85);
+    }
+
+    /* iOS Свитч */
+    .switch {
+      width: 38px;
+      height: 22px;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      position: relative;
+      transition: 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .switch::after {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      background: #ffffff;
+      border-radius: 50%;
+      top: 3px;
+      left: 3px;
+      transition: 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+    }
+    .switch.active {
+      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+      box-shadow: 0 0 14px rgba(14, 165, 233, 0.6);
+    }
+    .switch.active::after {
+      left: 19px;
+    }
+
+    /* Селектор пресета вручную */
+    .select-wrapper {
+      width: 100%;
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .glass-select {
+      flex: 1;
+      background: rgba(18, 22, 32, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #f8fafc;
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-size: 13px;
+      font-weight: 500;
+      outline: none;
+      backdrop-filter: blur(20px);
+      cursor: pointer;
+    }
+    .glass-select option {
+      background: #11141e;
+      color: #f8fafc;
+    }
+    .btn-action {
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      color: #38bdf8;
+      padding: 10px 16px;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .btn-action:hover {
+      background: rgba(56, 189, 248, 0.25);
+      color: #ffffff;
+    }
+
+    /* Подвал */
     .footer {
       padding: 12px 18px;
       border-radius: 18px;
@@ -459,63 +675,23 @@ const htmlUI = `<!DOCTYPE html>
       align-items: center;
       justify-content: space-between;
     }
-    .autorun-group {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 13px;
-      font-weight: 500;
-      color: rgba(255, 255, 255, 0.85);
-      cursor: pointer;
+    .footer-info {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.45);
     }
-
-    .switch {
-      width: 44px;
-      height: 26px;
-      background: rgba(255, 255, 255, 0.12);
-      border: 1px solid rgba(255, 255, 255, 0.18);
-      border-radius: 14px;
-      position: relative;
-      transition: all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
-      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
-    }
-    .switch::after {
-      content: '';
-      position: absolute;
-      width: 20px;
-      height: 20px;
-      background: #ffffff;
-      border-radius: 50%;
-      top: 2px;
-      left: 2px;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-      transition: all 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
-    }
-    .switch.active {
-      background: linear-gradient(135deg, #0ea5e9, #38bdf8);
-      border-color: rgba(255, 255, 255, 0.4);
-      box-shadow: 0 0 16px rgba(14, 165, 233, 0.5);
-    }
-    .switch.active::after {
-      left: 20px;
-    }
-
     .btn-quit {
       background: rgba(239, 68, 68, 0.12);
       border: 1px solid rgba(239, 68, 68, 0.25);
       color: #fca5a5;
-      padding: 7px 15px;
+      padding: 8px 16px;
       border-radius: 12px;
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      backdrop-filter: blur(10px);
-      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
-      transition: all 0.2s ease;
+      transition: 0.2s ease;
     }
     .btn-quit:hover {
-      background: rgba(239, 68, 68, 0.24);
-      border-color: rgba(239, 68, 68, 0.4);
+      background: rgba(239, 68, 68, 0.25);
       color: #ffffff;
     }
   </style>
@@ -525,15 +701,18 @@ const htmlUI = `<!DOCTYPE html>
   <div class="blob blob-2"></div>
   <div class="blob blob-3"></div>
 
-  <div class="header glass-panel">
+  <div class="header glass">
     <div class="title-group">
-      <h1>ZAPRET CONTROLLER</h1>
-      <p>Automated Bypass Suite • Powered by Flowseal Core</p>
+      <h1>ZAPRET ULTIMATE</h1>
+      <p>Flowseal Core Engine • Glassmorphism Edition</p>
     </div>
-    <div class="badge" id="badgeTotal">Загрузка...</div>
+    <div class="ping-badge">
+      <div class="ping-dot" id="pingDot"></div>
+      <span id="pingText">Пинг: -- ms</span>
+    </div>
   </div>
 
-  <div class="main-card glass-panel">
+  <div class="main-card glass">
     <div class="radar-wrapper">
       <div class="radar-ring" id="radarRing"></div>
       <div class="radar-core">
@@ -544,46 +723,84 @@ const htmlUI = `<!DOCTYPE html>
     </div>
     <div class="status-caption" id="statusTitle">Подбор рабочей стратегии...</div>
     <div class="current-strat" id="statusStrat">Инициализация</div>
+
+    <div class="controls-grid">
+      <div class="control-item" onclick="toggleGameMode()">
+        <span>Игровой режим (Discord Voice / UDP)</span>
+        <div class="switch" id="gameSwitch"></div>
+      </div>
+      <div class="control-item" onclick="toggleAutorun()">
+        <span>Автозапуск Windows</span>
+        <div class="switch" id="autoSwitch"></div>
+      </div>
+    </div>
+
+    <div class="select-wrapper">
+      <select class="glass-select" id="presetSelect" onchange="selectManualPreset(this.value)">
+        <option value="">Выбрать пресет вручную...</option>
+      </select>
+      <button class="btn-action" onclick="rescan()">Пересканировать</button>
+    </div>
   </div>
 
-  <div class="footer glass-panel">
-    <div class="autorun-group" onclick="toggleAutorun()">
-      <div class="switch" id="toggleSwitch"></div>
-      <span>Автозапуск при старте Windows</span>
-    </div>
+  <div class="footer glass">
+    <div class="footer-info">Управляется автоматически • Закройте для сворачивания</div>
     <button class="btn-quit" onclick="quitApp()">Отключить</button>
   </div>
 
   <script>
+    let listPopulated = false;
+
     async function update() {
       try {
         const res = await fetch('/api/status');
         const d = await res.json();
 
-        document.getElementById('badgeTotal').innerText = d.total + ' пресетов';
+        // Заполнение списка пресетов один раз
+        if (!listPopulated && d.presets_list && d.presets_list.length > 0) {
+          const sel = document.getElementById('presetSelect');
+          d.presets_list.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p;
+            opt.innerText = p;
+            sel.appendChild(opt);
+          });
+          listPopulated = true;
+        }
 
         const ring = document.getElementById('radarRing');
         const title = document.getElementById('statusTitle');
         const strat = document.getElementById('statusStrat');
+        const pingDot = document.getElementById('pingDot');
+        const pingText = document.getElementById('pingText');
+
+        if (d.ping_ms > 0) {
+          pingDot.className = 'ping-dot online';
+          pingText.innerText = 'Шлюз: ' + d.ping_ms + ' ms';
+        }
 
         if (d.is_running) {
-          title.innerText = 'Проверка пресета (' + d.current_idx + '/' + d.total + ')...';
+          title.innerText = 'Проверка стратегии (' + d.current_idx + '/' + d.total + ')...';
           strat.innerText = d.check_name;
           strat.className = 'current-strat';
           ring.className = 'radar-ring';
         } else if (d.is_done && d.active_name) {
-          title.innerText = 'Обход активирован:';
+          title.innerText = 'Обход успешно активен:';
           strat.innerText = d.active_name;
           strat.className = 'current-strat active-success';
           ring.className = 'radar-ring success';
+          document.getElementById('presetSelect').value = d.active_name;
         } else if (d.is_done && !d.active_name) {
           title.innerText = 'Внимание';
           strat.innerText = 'Ни один пресет не подошел';
           strat.style.color = '#f87171';
         }
 
-        const t = document.getElementById('toggleSwitch');
-        if (d.autorun) { t.classList.add('active'); } else { t.classList.remove('active'); }
+        const autoSw = document.getElementById('autoSwitch');
+        if (d.autorun) { autoSw.classList.add('active'); } else { autoSw.classList.remove('active'); }
+
+        const gameSw = document.getElementById('gameSwitch');
+        if (d.gamemode) { gameSw.classList.add('active'); } else { gameSw.classList.remove('active'); }
       } catch(e) {}
     }
 
@@ -592,12 +809,28 @@ const htmlUI = `<!DOCTYPE html>
       update();
     }
 
+    async function toggleGameMode() {
+      await fetch('/api/toggle-gamemode');
+      update();
+    }
+
+    async function selectManualPreset(name) {
+      if (!name) return;
+      await fetch('/api/select-preset?name=' + encodeURIComponent(name));
+      update();
+    }
+
+    async function rescan() {
+      await fetch('/api/rescan');
+      update();
+    }
+
     async function quitApp() {
       await fetch('/api/stop');
       window.close();
     }
 
-    setInterval(update, 700);
+    setInterval(update, 800);
     update();
   </script>
 </body>
