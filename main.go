@@ -34,16 +34,16 @@ var (
 )
 
 var appState = struct {
-	Total       int        `json:"total"`
-	CurrentIdx  int        `json:"current_idx"`
-	CheckName   string     `json:"check_name"`
-	ActiveName  string     `json:"active_name"`
-	IsRunning   bool       `json:"is_running"`
-	IsDone      bool       `json:"is_done"`
-	AutoRun     bool       `json:"autorun"`
-	GameMode    bool       `json:"gamemode"`
-	PingMs      int        `json:"ping_ms"`
-	PresetsList []string   `json:"presets_list"`
+	Total       int      `json:"total"`
+	CurrentIdx  int      `json:"current_idx"`
+	CheckName   string   `json:"check_name"`
+	ActiveName  string   `json:"active_name"`
+	IsRunning   bool     `json:"is_running"`
+	IsDone      bool     `json:"is_done"`
+	AutoRun     bool     `json:"autorun"`
+	GameMode    bool     `json:"gamemode"`
+	PingMs      int      `json:"ping_ms"`
+	PresetsList []string `json:"presets_list"`
 }{}
 
 func main() {
@@ -90,7 +90,7 @@ func initEngine() {
 	}
 
 	allStrats = scanBatFiles(baseDir, presetDir)
-	
+
 	var names []string
 	for _, s := range allStrats {
 		names = append(names, strings.TrimSuffix(s.Name, ".bat"))
@@ -130,7 +130,7 @@ func runBenchmarkEngine() {
 		mu.Unlock()
 
 		startStrategy(&strat)
-		time.Sleep(2000 * time.Millisecond)
+		time.Sleep(2200 * time.Millisecond)
 
 		ok, ping := testConnectionDetailed()
 		if ok {
@@ -157,7 +157,6 @@ func startStrategy(strat *Strategy) {
 	args := make([]string, len(strat.Args))
 	copy(args, strat.Args)
 
-	// Если включен игровой режим — добавляем параметры для Discord Voice/UDP
 	mu.Lock()
 	if appState.GameMode {
 		args = append(args, "--filter-udp=50000-65535", "--dpi-desync=fake", "--dpi-desync-any-protocol")
@@ -190,7 +189,10 @@ func scanBatFiles(baseDir, searchDir string) []Strategy {
 				continue
 			}
 
-			matches := argRegex.FindStringSubmatch(string(content))
+			rawContent := string(content)
+			rawContent = regexp.MustCompile(`\^\r?\n\s*`).ReplaceAllString(rawContent, " ")
+
+			matches := argRegex.FindStringSubmatch(rawContent)
 			if len(matches) > 1 {
 				rawArgs := matches[1]
 				binDir := filepath.Join(baseDir, "bin")
@@ -403,7 +405,6 @@ const htmlUI = `<!DOCTYPE html>
       position: relative;
     }
 
-    /* Жидкие цветные сферы */
     .blob {
       position: absolute;
       border-radius: 50%;
@@ -442,7 +443,6 @@ const htmlUI = `<!DOCTYPE html>
       100% { transform: translate(35px, 25px) scale(1.12); }
     }
 
-    /* Стеклянный контейнер с неоновым свечением */
     .glass {
       position: relative;
       z-index: 1;
@@ -455,7 +455,6 @@ const htmlUI = `<!DOCTYPE html>
         inset 0 1px 1px rgba(255, 255, 255, 0.3);
     }
 
-    /* Шапка */
     .header {
       padding: 14px 20px;
       border-radius: 20px;
@@ -499,7 +498,6 @@ const htmlUI = `<!DOCTYPE html>
       box-shadow: 0 0 8px #10b981;
     }
 
-    /* Главная карточка */
     .main-card {
       padding: 26px 22px;
       border-radius: 24px;
@@ -567,7 +565,6 @@ const htmlUI = `<!DOCTYPE html>
       -webkit-text-fill-color: transparent;
     }
 
-    /* Стеклянный блок настроек */
     .controls-grid {
       width: 100%;
       display: grid;
@@ -596,7 +593,6 @@ const htmlUI = `<!DOCTYPE html>
       color: rgba(255, 255, 255, 0.85);
     }
 
-    /* iOS Свитч */
     .switch {
       width: 38px;
       height: 22px;
@@ -625,7 +621,6 @@ const htmlUI = `<!DOCTYPE html>
       left: 19px;
     }
 
-    /* Селектор пресета вручную */
     .select-wrapper {
       width: 100%;
       margin-top: 12px;
@@ -667,7 +662,6 @@ const htmlUI = `<!DOCTYPE html>
       color: #ffffff;
     }
 
-    /* Подвал */
     .footer {
       padding: 12px 18px;
       border-radius: 18px;
@@ -756,7 +750,6 @@ const htmlUI = `<!DOCTYPE html>
         const res = await fetch('/api/status');
         const d = await res.json();
 
-        // Заполнение списка пресетов один раз
         if (!listPopulated && d.presets_list && d.presets_list.length > 0) {
           const sel = document.getElementById('presetSelect');
           d.presets_list.forEach(p => {
