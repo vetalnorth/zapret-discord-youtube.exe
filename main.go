@@ -17,14 +17,14 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// ANSI Цвета
 const (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorGreen  = "\033[32m"
-	colorYellow = "\033[33m"
-	colorCyan   = "\033[36m"
-	colorBold   = "\033[1m"
+	colReset  = "\033[0m"
+	colRed    = "\033[91m"
+	colGreen  = "\033[92m"
+	colYellow = "\033[93m"
+	colCyan   = "\033[96m"
+	colGray   = "\033[90m"
+	colBold   = "\033[1m"
 )
 
 type Strategy struct {
@@ -32,99 +32,111 @@ type Strategy struct {
 	Args []string
 }
 
-func enableANSI() {
-	var mode uint32
+func initConsole() {
 	handle := windows.Handle(os.Stdout.Fd())
+	var mode uint32
 	if err := windows.GetConsoleMode(handle, &mode); err == nil {
 		_ = windows.SetConsoleMode(handle, mode|windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING)
 	}
+	// Устанавливаем заголовок окна консоли
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	setConsoleTitle := kernel32.NewProc("SetConsoleTitleW")
+	titlePtr, _ := windows.UTF16PtrFromString("Zapret DPI Manager")
+	_, _, _ = setConsoleTitle.Call(uintptr(unsafePointer(titlePtr)))
+}
+
+func unsafePointer(p *uint16) *uint16 {
+	return p
 }
 
 func main() {
-	enableANSI()
+	initConsole()
 
-	fmt.Print("\033[H\033[2J") // Очистка экрана
-	fmt.Println(colorCyan + colorBold + `
-  ███████╗ █████╗ ██████╗ ██████╗ ███████╗████████╗
-  ╚══███╔╝██╔══██╗██╔══██╗██╔══██╗██╔════╝╚══██╔══╝
-    ███╔╝ ███████║██████╔╝██████╔╝█████╗     ██║   
-   ███╔╝  ██╔══██║██╔═══╝ ██╔══██╗██╔══╝     ██║   
-  ███████╗██║  ██║██║     ██║  ██║███████╗   ██║   
-  ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝   ` + colorReset)
-	fmt.Println(colorYellow + "   >>> Launcher by vetalnorth | Core & Presets by Flowseal <<<   " + colorReset)
-	fmt.Println("------------------------------------------------------------------")
+	fmt.Print("\033[H\033[2J") // Очистка терминала
+	fmt.Println(colCyan + colBold + `
+  ┌──────────────────────────────────────────────────────────┐
+  │                   ZAPRET DPI CONTROLLER                  │
+  │     Automated Bypass Suite • Powered by Flowseal Core    │
+  └──────────────────────────────────────────────────────────┘` + colReset)
 
 	exePath, err := os.Executable()
 	if err != nil {
-		fmt.Printf(colorRed+"[-] Критическая ошибка путей: %v\n"+colorReset, err)
+		fmt.Printf(colRed+"[-] Ошибка определения каталога: %v\n"+colReset, err)
 		return
 	}
 	baseDir := filepath.Dir(exePath)
 	winwsPath := filepath.Join(baseDir, "bin", "winws.exe")
 
 	if _, err := os.Stat(winwsPath); os.IsNotExist(err) {
-		fmt.Println(colorRed + "[-] winws.exe не обнаружен в папке bin/!" + colorReset)
-		fmt.Println("    Убедитесь, что архив распакован полностью.")
+		fmt.Println(colRed + " [!] Ошибка: winws.exe не найден в каталоге bin/" + colReset)
+		fmt.Println(colGray + "     Убедитесь, что архив полностью извлечен на диск." + colReset)
 		waitExit()
 		return
 	}
 
 	checkAutoRun()
 
-	strategies := scanLocalBatFiles(baseDir)
+	// 1. Ищем батники сначала в скрытой папке presets, затем в корне
+	presetDir := filepath.Join(baseDir, "presets")
+	if _, err := os.Stat(presetDir); os.IsNotExist(err) {
+		presetDir = baseDir
+	}
+
+	strategies := scanBatFiles(baseDir, presetDir)
 	if len(strategies) == 0 {
-		fmt.Println(colorRed + "[-] В папке не найдено ни одного батника обхода (general*.bat)!" + colorReset)
+		fmt.Println(colRed + " [!] Не найдено ни одного файла конфигурации (general*.bat)!" + colReset)
+		fmt.Println(colGray + "     Проверьте наличие папки 'presets' рядом с программой." + colReset)
 		waitExit()
 		return
 	}
 
-	fmt.Printf("\n[i] Обнаружено готовых стратегий обхода: %s%d%s\n", colorBold, len(strategies), colorReset)
-	fmt.Println("[*] Запуск автоматического тестирования под вашего провайдера...\n")
+	fmt.Printf("\n "+colCyan+"•"+colReset+" Загружено пресетов Flowseal: %s%d шт.%s\n", colBold, len(strategies), colReset)
+	fmt.Println(" " + colYellow + "•" + colReset + " Начинаем автоподбор рабочей стратегии под вашего провайдера...\n")
 
 	var workingStrat *Strategy
 
 	for i, strat := range strategies {
 		displayName := strings.TrimSuffix(strat.Name, ".bat")
-		fmt.Printf(" [%s%d/%d%s] %-30s ", colorCyan, i+1, len(strategies), colorReset, displayName)
+		fmt.Printf("   [%s%02d/%02d%s] %-32s ", colCyan, i+1, len(strategies), colReset, displayName)
 
 		stopWinWS()
 
 		cmd := exec.Command(winwsPath, strat.Args...)
 		if err := cmd.Start(); err != nil {
-			fmt.Println(colorRed + "[ОШИБКА ЗАПУСКА]" + colorReset)
+			fmt.Println(colRed + "ОШИБКА СТАРТА" + colReset)
 			continue
 		}
 
 		time.Sleep(1400 * time.Millisecond)
 
 		if testConnection() {
-			fmt.Println(colorGreen + colorBold + "[РАБОТАЕТ]" + colorReset)
+			fmt.Println(colGreen + colBold + "✔ РАБОТАЕТ" + colReset)
 			workingStrat = &strat
 			break
 		} else {
-			fmt.Println(colorRed + "[БЛОКИРУЕТСЯ]" + colorReset)
+			fmt.Println(colGray + "✖ блокируется" + colReset)
 		}
 	}
 
 	if workingStrat == nil {
-		fmt.Println(colorRed + "\n[-] Ни одна из доступных стратегий не пробила фильтрацию." + colorReset)
+		fmt.Println(colRed + "\n [!] Ни один пресет не открыл доступ к тестовому шлюзу." + colReset)
 		stopWinWS()
 		waitExit()
 		return
 	}
 
-	fmt.Println("\n---------------------------------------------------------")
-	fmt.Printf(colorGreen+colorBold+"[+] УСПЕШНО: активирована стратегия %s\n"+colorReset, workingStrat.Name)
-	fmt.Println("---------------------------------------------------------")
+	fmt.Println("\n" + colGreen + " ┌──────────────────────────────────────────────────────────┐")
+	fmt.Printf(" │  УСПЕШНО АКТИВИРОВАНО: %-33s │\n", workingStrat.Name)
+	fmt.Println(" └──────────────────────────────────────────────────────────┘" + colReset)
 
 	suggestAutoRun(exePath)
 
-	fmt.Println(colorCyan + "\n[•] Служба работает в фоне. Закройте окно для отключения." + colorReset)
+	fmt.Println(colCyan + "\n [i] Служба активна в фоне. Сверните это окно, пока пользуетесь сетью." + colReset)
 	waitExit()
 }
 
-func scanLocalBatFiles(baseDir string) []Strategy {
-	files, err := os.ReadDir(baseDir)
+func scanBatFiles(baseDir, searchDir string) []Strategy {
+	files, err := os.ReadDir(searchDir)
 	if err != nil {
 		return nil
 	}
@@ -134,7 +146,7 @@ func scanLocalBatFiles(baseDir string) []Strategy {
 
 	for _, f := range files {
 		if !f.IsDir() && strings.HasPrefix(strings.ToLower(f.Name()), "general") && strings.HasSuffix(strings.ToLower(f.Name()), ".bat") {
-			content, err := os.ReadFile(filepath.Join(baseDir, f.Name()))
+			content, err := os.ReadFile(filepath.Join(searchDir, f.Name()))
 			if err != nil {
 				continue
 			}
@@ -142,8 +154,11 @@ func scanLocalBatFiles(baseDir string) []Strategy {
 			matches := argRegex.FindStringSubmatch(string(content))
 			if len(matches) > 1 {
 				rawArgs := matches[1]
+				// Корректируем пути под структуру с подпапкой presets
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0bin\\", filepath.Join(baseDir, "bin")+"\\")
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0lists\\", filepath.Join(baseDir, "lists")+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\bin\\", filepath.Join(baseDir, "bin")+"\\")
+				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0..\\lists\\", filepath.Join(baseDir, "lists")+"\\")
 				rawArgs = strings.ReplaceAll(rawArgs, "%~dp0", baseDir+"\\")
 
 				args := parseArgs(rawArgs)
@@ -183,11 +198,11 @@ func parseArgs(raw string) []string {
 
 func testConnection() bool {
 	client := http.Client{
-		Timeout: 2200 * time.Millisecond,
+		Timeout: 2000 * time.Millisecond,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			DialContext: (&net.Dialer{
-				Timeout: 1800 * time.Millisecond,
+				Timeout: 1500 * time.Millisecond,
 			}).DialContext,
 		},
 	}
@@ -214,7 +229,7 @@ func checkAutoRun() {
 
 	val, _, err := k.GetStringValue("ZapretLauncher")
 	if err == nil && val != "" {
-		fmt.Println(colorGreen + "[v] Автозагрузка Windows: включена" + colorReset)
+		fmt.Println(" " + colGreen + "✔" + colReset + " Автозагрузка Windows: " + colBold + "ВКЛЮЧЕНА" + colReset)
 	}
 }
 
@@ -228,7 +243,7 @@ func suggestAutoRun(appPath string) {
 		}
 	}
 
-	fmt.Print("\n[?] Запускать выбранную конфигурацию при включении ПК? (y/n): ")
+	fmt.Print("\n " + colYellow + "?" + colReset + " Запускать этот режим автоматически при старте Windows? (y/n): ")
 	reader := bufio.NewReader(os.Stdin)
 	ans, _ := reader.ReadString('\n')
 	ans = strings.ToLower(strings.TrimSpace(ans))
@@ -238,7 +253,7 @@ func suggestAutoRun(appPath string) {
 		if err == nil {
 			defer kWrite.Close()
 			_ = kWrite.SetStringValue("ZapretLauncher", fmt.Sprintf("\"%s\"", appPath))
-			fmt.Println(colorGreen + "[+] Запуск добавлен в автозагрузку системы." + colorReset)
+			fmt.Println(" " + colGreen + "✔" + colReset + " Успешно прописано в автозапуск системы.")
 		}
 	}
 }
