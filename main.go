@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -46,7 +47,34 @@ var appState = struct {
 	PresetsList []string `json:"presets_list"`
 }{}
 
+func checkAdmin() bool {
+	_, err := os.Open("\\\\.\\PHYSICALDRIVE0")
+	return err == nil
+}
+
+func runAsAdmin() {
+	verb := "runas"
+	exe, _ := os.Executable()
+	cwd, _ := os.Getwd()
+	args := strings.Join(os.Args[1:], " ")
+
+	verbPtr, _ := syscall.UTF16PtrFromString(verb)
+	exePtr, _ := syscall.UTF16PtrFromString(exe)
+	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
+	argPtr, _ := syscall.UTF16PtrFromString(args)
+
+	var showCmd int32 = 1
+
+	_ = windows.ShellExecute(0, verbPtr, exePtr, argPtr, cwdPtr, showCmd)
+	os.Exit(0)
+}
+
 func main() {
+	if !checkAdmin() {
+		runAsAdmin()
+		return
+	}
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return
@@ -84,12 +112,7 @@ func initEngine() {
 	appState.AutoRun = checkAutoRun()
 	mu.Unlock()
 
-	presetDir := filepath.Join(baseDir, "presets")
-	if _, err := os.Stat(presetDir); os.IsNotExist(err) {
-		presetDir = baseDir
-	}
-
-	allStrats = scanBatFiles(baseDir, presetDir)
+	allStrats = scanBatFiles(baseDir)
 
 	var names []string
 	for _, s := range allStrats {
@@ -172,7 +195,7 @@ func startStrategy(strat *Strategy) {
 	_ = currentCmd.Start()
 }
 
-func scanBatFiles(baseDir, searchDir string) []Strategy {
+func scanBatFiles(searchDir string) []Strategy {
 	files, err := os.ReadDir(searchDir)
 	if err != nil {
 		return nil
